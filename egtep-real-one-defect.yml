@@ -1,0 +1,90 @@
+name: EGTEP real Defects4J single-defect evidence
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Frozen pilot project: Codec or Csv'
+        required: true
+        type: choice
+        options: [Codec, Csv]
+        default: Codec
+      bug_id:
+        description: 'Single defect ID (try 1 first)'
+        required: true
+        default: '1'
+        type: string
+permissions:
+  contents: read
+jobs:
+  one-bug:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Prepare evidence directory and system environment
+        run: |
+          mkdir -p results/_workflow
+          env | grep -E '^(JAVA_HOME|TZ|RUNNER_OS)=' > results/_workflow/environment.txt || true
+          java -version 2>&1 | tee results/_workflow/java_version.log
+          df -h . | tee results/_workflow/disk_before.log
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y git curl unzip subversion perl cpanminus ant maven
+          avail_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+          if [ "$avail_kb" -lt 8388608 ]; then echo "BLOCKED: less than 8 GiB free"; exit 1; fi
+          export TZ=America/Los_Angeles
+          echo "TZ=America/Los_Angeles" >> "$GITHUB_ENV"
+      - name: Fetch pinned Defects4J framework
+        run: |
+          mkdir -p work
+          git clone --quiet https://github.com/rjust/defects4j.git work/defects4j
+          git -C work/defects4j checkout --quiet 8c16da8230843cdc918eaf4ddb449637f02b83c6
+          git -C work/defects4j rev-parse HEAD | tee results/_workflow/d4j_commit.txt
+          echo "D4J_HOME=$GITHUB_WORKSPACE/work/defects4j" >> "$GITHUB_ENV"
+      - name: Install Defects4J in bounded window
+        run: |
+          cd work/defects4j
+          sudo timeout 240 cpanm --quiet --notest --installdeps . 2>&1 | tee "$GITHUB_WORKSPACE/results/_workflow/cpanm.log"
+          timeout 1200 ./init.sh 2>&1 | tee "$GITHUB_WORKSPACE/results/_workflow/d4j_init.log"
+          echo "$GITHUB_WORKSPACE/work/defects4j/framework/bin" >> "$GITHUB_PATH"
+          df -h . | tee "$GITHUB_WORKSPACE/results/_workflow/disk_after_init.log"
+      - name: Fetch fixed GZoltar jars (small Maven artifacts)
+        run: |
+          mkdir -p work/jars
+          base=https://repo.maven.apache.org/maven2/com/gzoltar
+          curl -fsSL --retry 2 --max-time 120 \
+            "$base/com.gzoltar.cli/1.7.3/com.gzoltar.cli-1.7.3-jar-with-dependencies.jar" \
+            -o work/jars/gzoltar-cli.jar
+          curl -fsSL --retry 2 --max-time 120 \
+            "$base/com.gzoltar.agent.rt/1.7.3/com.gzoltar.agent.rt-1.7.3-all.jar" \
+            -o work/jars/gzoltar-agent.jar
+          unzip -tq work/jars/gzoltar-cli.jar
+          unzip -tq work/jars/gzoltar-agent.jar
+          sha256sum work/jars/*.jar > results/_workflow/gzoltar_jar_sha256.txt
+          echo "GZOLTAR_CLI_JAR=$GITHUB_WORKSPACE/work/jars/gzoltar-cli.jar" >> "$GITHUB_ENV"
+          echo "GZOLTAR_AGENT_JAR=$GITHUB_WORKSPACE/work/jars/gzoltar-agent.jar" >> "$GITHUB_ENV"
+      - name: Collect one real buggy-revision spectrum
+        env:
+          EGTEP_OUTPUT: ${{ github.workspace }}/results
+          EGTEP_KIT_DIR: ${{ github.workspace }}
+        run: |
+          timeout 1500 bash scripts/run_one_bug.sh "${{ inputs.project }}" "${{ inputs.bug_id }}"
+      - name: Save evidence even when execution is blocked
+        if: always()
+        run: |
+          date -u '+UTC=%FT%TZ' > results/_workflow/finalized_utc.txt
+          find results -type f -print0 | sort -z | xargs -0 -r sha256sum > results/_workflow/all_evidence_sha256.txt
+          df -h . > results/_workflow/disk_final.log
+      - name: Upload original logs and source/coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: egtep-real-${{ inputs.project }}-${{ inputs.bug_id }}-evidence
+          path: |
+            results/**
+            !results/**/checkout_buggy/**
+          retention-days: 14
+          if-no-files-found: warn
