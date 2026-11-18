@@ -1,0 +1,48 @@
+import tempfile
+import unittest
+from pathlib import Path
+from scripts.validate_spectra import validate
+
+
+class SpectrumValidatorTests(unittest.TestCase):
+    def prepare(self, work):
+        p = Path(work)
+        (p / 'tests.csv').write_text('name,outcome\ntestA,PASS\ntestB,FAIL\n')
+        (p / 'spectra.csv').write_text('name\npkg.Foo#foo:10\npkg.Foo#bar:20\n')
+        (p / 'matrix.txt').write_text('1 0 +\n1 1 -\n')
+        (p / 'candidates.txt').write_text('pkg.Foo\n')
+        return p
+
+    def test_good_input_stays_blocked_until_independent_audit(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prepare(d)
+            r = validate(p, p/'candidates.txt')
+            self.assertEqual((r['test_count'], r['pass'], r['fail']), (2, 1, 1))
+            self.assertEqual(r['status'], 'INPUT_STRUCTURE_VALID')
+            self.assertEqual(r['formal_E01_status'], 'BLOCKED_UNTIL_INDEPENDENT_AUDIT')
+
+    def test_rejects_missing_outcome(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prepare(d)
+            (p / 'tests.csv').write_text('name\ntestA\ntestB\n')
+            (p / 'matrix.txt').write_text('1 0\n1 1\n')
+            with self.assertRaises(ValueError):
+                validate(p, p/'candidates.txt')
+
+    def test_rejects_mismatched_outcome(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prepare(d)
+            (p / 'matrix.txt').write_text('1 0 -\n1 1 +\n')
+            with self.assertRaises(ValueError):
+                validate(p, p/'candidates.txt')
+
+    def test_rejects_rows_omitted(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prepare(d)
+            (p / 'matrix.txt').write_text('1 0 +\n')
+            with self.assertRaises(ValueError):
+                validate(p, p/'candidates.txt')
+
+
+if __name__ == '__main__':
+    unittest.main()
