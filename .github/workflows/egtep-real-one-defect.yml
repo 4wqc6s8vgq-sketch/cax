@@ -1,26 +1,31 @@
-name: EGTEP real Defects4J single-defect evidence
+name: EGTEP real Defects4J multi-defect E01 V6
 on:
   workflow_dispatch:
-    inputs:
-      project:
-        description: 'Frozen pilot project: Codec or Csv'
-        required: true
-        type: choice
-        options: [Codec, Csv]
-        default: Codec
-      bug_id:
-        description: 'Single defect ID (try 1 first)'
-        required: true
-        default: '1'
-        type: string
 permissions:
   contents: read
 jobs:
   one-bug:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - project: Codec
+            bug_id: "2"
+          - project: Csv
+            bug_id: "1"
+          - project: Csv
+            bug_id: "2"
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Verify collection scripts before expensive setup
+        run: |
+          set -euo pipefail
+          bash -n scripts/run_one_bug.sh
+          python3 -m py_compile scripts/validate_spectra.py
+          echo "Verified project=${{ matrix.project }} bug=${{ matrix.bug_id }}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -71,7 +76,7 @@ jobs:
           EGTEP_OUTPUT: ${{ github.workspace }}/results
           EGTEP_KIT_DIR: ${{ github.workspace }}
         run: |
-          timeout 1500 bash scripts/run_one_bug.sh "${{ inputs.project }}" "${{ inputs.bug_id }}"
+          timeout 1500 bash scripts/run_one_bug.sh "${{ matrix.project }}" "${{ matrix.bug_id }}"
       # Insert immediately AFTER Collect one real buggy-revision spectrum,
       # BEFORE Save evidence even when execution is blocked.
       - name: Export real compiled method universe and workflow provenance
@@ -115,16 +120,15 @@ jobs:
         if: always()
         run: |
           date -u '+UTC=%FT%TZ' > results/_workflow/finalized_utc.txt
-          find results -type f -print0 | sort -z | xargs -0 -r sha256sum > results/_workflow/all_evidence_sha256.txt
+          find results -type f ! -path "results/_workflow/all_evidence_sha256.txt" ! -path "results/_workflow/disk_final.log" -print0 | sort -z | xargs -0 -r sha256sum > results/_workflow/all_evidence_sha256.txt
           df -h . > results/_workflow/disk_final.log
       - name: Upload original logs and source/coverage evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: egtep-real-${{ inputs.project }}-${{ inputs.bug_id }}-evidence
+          name: egtep-real-${{ matrix.project }}-${{ matrix.bug_id }}-evidence
           path: |
             results/**
             !results/**/checkout_buggy/**
           retention-days: 14
           if-no-files-found: warn
-
