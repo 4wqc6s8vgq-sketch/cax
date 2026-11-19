@@ -72,6 +72,45 @@ jobs:
           EGTEP_KIT_DIR: ${{ github.workspace }}
         run: |
           timeout 1500 bash scripts/run_one_bug.sh "${{ inputs.project }}" "${{ inputs.bug_id }}"
+      # Insert immediately AFTER Collect one real buggy-revision spectrum,
+      # BEFORE Save evidence even when execution is blocked.
+      - name: Export real compiled method universe and workflow provenance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$GITHUB_WORKSPACE/results/_bytecode"
+          mkdir -p "$dest"
+          cp scripts/run_one_bug.sh "$dest/run_one_bug.sh"
+          cp -r .github/workflows "$dest/workflows"
+          printf 'run=%s\nsha=%s\nrepository=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" "$GITHUB_REPOSITORY" > "$dest/actions_provenance.txt"
+          found=0
+          while IFS= read -r -d '' config; do
+            wd="$(dirname "$config")"
+            found=$((found+1))
+            output="$dest/checkout_$found"
+            mkdir -p "$output/classes"
+            cp "$config" "$output/defects4j.config"
+            git -C "$wd" log -10 --format=fuller > "$output/checkout_history.txt"
+            git -C "$wd" status --porcelain > "$output/git_status.txt"
+            git -C "$wd" diff > "$output/uncommitted.diff"
+            bin=$(defects4j export -p dir.bin.classes -w "$wd")
+            case "$bin" in /*) root="$bin" ;; *) root="$wd/$bin" ;; esac
+            test -d "$root"
+            count=0
+            while IFS= read -r -d '' file; do
+              rel="${file#"$root/"}"
+              mkdir -p "$output/classes/$(dirname "$rel")"
+              cp "$file" "$output/classes/$rel"
+              javap -p -s -l "$file" > "$output/classes/$rel.javap.txt"
+              count=$((count+1))
+            done < <(find "$root" -type f -name '*.class' -print0)
+            test "$count" -gt 0
+            printf '%s\n' "$count" > "$output/class_count.txt"
+          done < <(find "$GITHUB_WORKSPACE/results" -type f -name '.defects4j.config' -print0)
+          test "$found" -gt 0
+          find "$dest" -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > "$dest/SHA256SUMS.txt"
+
       - name: Save evidence even when execution is blocked
         if: always()
         run: |
@@ -88,3 +127,4 @@ jobs:
             !results/**/checkout_buggy/**
           retention-days: 14
           if-no-files-found: warn
+
